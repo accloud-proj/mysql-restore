@@ -28,7 +28,7 @@ Download and extract your platform's archive from
 ./mysql-restore init
 ```
 
-No Python or uv required. Builds cover Windows x86_64 and Linux/macOS
+No Python or uv required. Windows, Linux and macOS builds cover
 x86_64 and ARM64. Linux requires Ubuntu 22.04 or compatible; macOS requires 15+.
 On Windows use `.\mysql-restore.exe`. Install MySQL clients and Docker separately
 and make them available in PATH.

@@ -26,7 +26,7 @@ def build(version: str) -> Path:
     version = release_version(version)
     system = {"Windows": "windows", "Linux": "linux", "Darwin": "macos"}[platform.system()]
     architecture = {"AMD64": "x86_64", "x86_64": "x86_64",
-                    "aarch64": "arm64", "arm64": "arm64"}[platform.machine()]
+                    "aarch64": "arm64", "arm64": "arm64", "ARM64": "arm64"}[platform.machine()]
     work = ROOT / "build"
     work.mkdir(exist_ok=True)
     (work / "version.txt").write_text(version + "\n", encoding="utf-8")

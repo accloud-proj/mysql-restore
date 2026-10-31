@@ -21,7 +21,7 @@
 ./mysql-restore init
 ```
 
-提供 Windows x86_64，以及 Linux、macOS 的 x86_64／ARM64 版本。Linux 需要 Ubuntu 22.04 或兼容系统，macOS 需要 15+；Windows 使用 `.\mysql-restore.exe`。MySQL 客户端和 Docker 仍需自行安装，并加入 PATH。
+Windows、Linux、macOS 均提供 x86_64／ARM64 版本。Linux 需要 Ubuntu 22.04 或兼容系统，macOS 需要 15+；Windows 使用 `.\mysql-restore.exe`。MySQL 客户端和 Docker 仍需自行安装，并加入 PATH。
 
 ### 方式二：克隆源码运行
 
