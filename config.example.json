@@ -1,0 +1,15 @@
+{
+  "format": 1,
+  "host": "127.0.0.1",
+  "port": 3306,
+  "user": "backup",
+  "defaults_file": "./mysql-restore.client.cnf",
+  "mysql_version": "8.4.7",
+  "role": "primary",
+  "backup_dir": "./backups",
+  "binlog_dir": "/srv/mysql/data",
+  "binlog_index": "/srv/mysql/data/mysql-bin.index",
+  "schedule": "0 2 * * *",
+  "max_backups": null,
+  "log_file": "./mysql-backup.log"
+}

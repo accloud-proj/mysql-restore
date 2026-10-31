@@ -1,0 +1,17 @@
+[project]
+name = "mysql-restore"
+version = "0.1.0"
+description = "Mysqldump GTID backups and direct-binlog Docker point-in-time recovery"
+readme = "README.md"
+authors = [
+    { name = "i-curve", email = "i-curve@qq.com" }
+]
+requires-python = ">=3.14"
+dependencies = []
+
+[project.scripts]
+mysql-restore = "mysql_restore:main"
+
+[build-system]
+requires = ["uv_build>=0.13.1,<0.14.0"]
+build-backend = "uv_build"
