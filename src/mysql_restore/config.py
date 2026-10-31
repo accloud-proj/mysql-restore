@@ -1,7 +1,7 @@
 """Private JSON configuration and interactive setup."""
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import getpass
 import json
 import os
@@ -11,7 +11,9 @@ import sys
 import tempfile
 from typing import Optional
 
-from .backup import BackupError, quote_option, read_json, supported_version, write_client_file
+from .backup import (
+    BackupError, quote_option, read_json, source_connection, supported_version, write_client_file,
+)
 
 
 def validate_schedule(value: str) -> str:
@@ -48,10 +50,10 @@ class Config:
     port: int
     user: str
     defaults_file: Path
-    mysql_version: str
-    role: str
+    mysql_version: Optional[str]
+    role: Optional[str]
     backup_dir: Path
-    binlog_dir: Path
+    binlog_dir: Optional[Path]
     binlog_index: Optional[Path]
     schedule: str
     log_file: Path
@@ -68,25 +70,29 @@ class Config:
 
 def parse_config(path: Path, data: dict) -> Config:
     required = {
-        "format", "host", "port", "user", "defaults_file", "mysql_version", "role",
-        "backup_dir", "binlog_dir", "schedule", "log_file",
+        "format", "host", "port", "user", "defaults_file",
+        "backup_dir", "schedule", "log_file",
     }
+    automatic = {"mysql_version", "role", "binlog_dir", "binlog_index"}
     if missing := required - data.keys():
         raise BackupError("Missing configuration fields: " + ", ".join(sorted(missing)))
-    if extra := data.keys() - required - {"binlog_index", "max_backups"}:
+    if extra := data.keys() - required - automatic - {"max_backups"}:
         raise BackupError("Unknown configuration fields: " + ", ".join(sorted(extra)))
     if type(data["format"]) is not int or data["format"] != 1:
         raise BackupError("Unsupported configuration format")
     for key in required - {"format", "port"}:
         if not isinstance(data[key], str) or not data[key]:
             raise BackupError("Configuration field must be a nonempty string: " + key)
+    for key in automatic:
+        if data.get(key) is not None and (not isinstance(data[key], str) or not data[key]):
+            raise BackupError("Configuration field must be a nonempty string or null: " + key)
     if type(data["port"]) is not int or not 1 <= data["port"] <= 65535:
         raise BackupError("Configuration port must be an integer from 1 to 65535")
-    if data["role"] not in {"primary", "replica"}:
+    if data.get("role") not in {None, "primary", "replica"}:
         raise BackupError("role must be primary or replica")
     quote_option(data["host"])
     quote_option(data["user"])
-    version = supported_version(data["mysql_version"])
+    version = supported_version(data["mysql_version"]) if data.get("mysql_version") else None
     limit = data.get("max_backups", 0)
     if limit is None:
         limit = 0
@@ -97,20 +103,48 @@ def parse_config(path: Path, data: dict) -> Config:
     if index is not None and not isinstance(index, str):
         raise BackupError("binlog_index must be a path string or null")
     backup_dir = path_value(base, data["backup_dir"])
-    binlog_dir = path_value(base, data["binlog_dir"])
-    if backup_dir == binlog_dir or backup_dir in binlog_dir.parents or binlog_dir in backup_dir.parents:
-        raise BackupError("Backup and source binlog directories must be separate and non-nested")
-    # Docker --mount uses comma-separated fields.
-    if "," in str(binlog_dir):
-        raise BackupError("Docker binlog mount paths cannot contain commas")
+    binlog_dir = path_value(base, data["binlog_dir"]) if data.get("binlog_dir") else None
+    if binlog_dir is not None:
+        validate_binlog_directory(backup_dir, binlog_dir)
     return Config(
         path=path, host=data["host"], port=data["port"], user=data["user"],
-        defaults_file=path_value(base, data["defaults_file"]), mysql_version=version, role=data["role"],
+        defaults_file=path_value(base, data["defaults_file"]), mysql_version=version, role=data.get("role"),
         backup_dir=backup_dir, binlog_dir=binlog_dir,
         binlog_index=path_value(base, index) if index else None,
         schedule=validate_schedule(data["schedule"]), log_file=path_value(base, data["log_file"]),
         max_backups=limit,
     )
+
+
+def validate_binlog_directory(backup_dir: Path, binlog_dir: Path) -> None:
+    if backup_dir == binlog_dir or backup_dir in binlog_dir.parents or binlog_dir in backup_dir.parents:
+        raise BackupError("Backup and source binlog directories must be separate and non-nested")
+    # Docker --mount uses comma-separated fields.
+    if "," in str(binlog_dir):
+        raise BackupError("Docker binlog mount paths cannot contain commas")
+
+
+def resolve_source(config: Config) -> Config:
+    """Resolve omitted server fields only for commands that use the live source."""
+    if config.mysql_version and config.role and config.binlog_dir:
+        return config
+    with source_connection(config.arguments()) as source:
+        settings = source.inspect(config.role)
+        if config.mysql_version and config.mysql_version != settings["mysql_version"]:
+            raise BackupError("Configured MySQL version differs from the live source")
+        directory = config.binlog_dir
+        if directory is None:
+            server_directory = source.log_directory()
+            directory = path_value(config.path.parent, str(server_directory))
+            if not directory.is_dir():
+                raise BackupError(
+                    "Detected source binlog directory is not accessible on this host: {}. "
+                    "Set binlog_dir to the host path; for Docker sources use the bind-mount path."
+                    .format(directory)
+                )
+    validate_binlog_directory(config.backup_dir, directory)
+    return replace(config, mysql_version=settings["mysql_version"], role=settings["role"],
+                   binlog_dir=directory)
 
 
 def load_config(path: Path) -> Config:
@@ -153,11 +187,7 @@ def initialize(path: Path, defaults_file: Optional[Path] = None) -> Config:
         "host": prompt("Source host", "127.0.0.1"),
         "port": int(prompt("Source port", "3306")),
         "user": prompt("Backup user", "backup"),
-        "mysql_version": prompt("Exact MySQL patch version", "8.4.7"),
-        "role": prompt("Source role (primary/replica)", "primary"),
         "backup_dir": prompt("Full backup directory", "./backups"),
-        "binlog_dir": prompt("Local source binlog directory (not relay logs)", "/var/lib/mysql"),
-        "binlog_index": prompt("Optional source binlog .index file (empty = query source)") or None,
         "schedule": prompt("Full backup cron schedule", "0 2 * * *"),
         "log_file": prompt("Backup cron log file", "./mysql-backup.log"),
     }
@@ -181,6 +211,10 @@ def initialize(path: Path, defaults_file: Optional[Path] = None) -> Config:
                 write_client_file(temporary, {"password": password})
                 publish_text(client, temporary.read_text())
             created_client = True
+        config = resolve_source(config)
+        print("Detected source: MySQL {}, {}, binlogs: {}".format(
+            config.mysql_version, config.role, config.binlog_dir,
+        ), flush=True)
         publish_text(path, json.dumps(data, indent=2) + "\n")
     except BaseException:
         if created_client:

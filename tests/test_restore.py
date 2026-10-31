@@ -1,6 +1,11 @@
 from pathlib import Path
+from contextlib import redirect_stderr
 import hashlib
+import io
+import sys
 import tempfile
+import threading
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -277,6 +282,131 @@ class RestoreTests(unittest.TestCase):
         metadata["anchor_sha256"] = "wrong"
         with self.assertRaisesRegex(backup.BackupError, "rewritten"):
             restore.select_logs(self.local, metadata, backup.parse_time("2026-10-31T07:00:00Z"), window)
+
+    def test_progress_reports_heartbeat_and_stops_after_completion(self):
+        messages = []
+        heartbeat = threading.Event()
+
+        def capture(message):
+            messages.append(message)
+            if message.startswith("RUNNING:"):
+                heartbeat.set()
+
+        with patch.object(restore, "PROGRESS_INTERVAL", 0.005), \
+                patch.object(restore, "progress_log", side_effect=capture):
+            with restore.progress_step("Waiting for Docker"):
+                self.assertTrue(heartbeat.wait(2), "No heartbeat while step was running")
+        self.assertTrue(messages[0].startswith("START: Waiting for Docker"))
+        self.assertTrue(messages[-1].startswith("DONE: Waiting for Docker"))
+        self.assertIn("elapsed", messages[-1])
+        self.assertFalse(any(thread.name == "restore-progress" for thread in threading.enumerate()))
+
+    def test_progress_failure_and_interruption_never_report_done(self):
+        for failure in [backup.BackupError("import failed"), KeyboardInterrupt()]:
+            messages = []
+            with patch.object(restore, "progress_log", side_effect=messages.append):
+                with self.assertRaises(type(failure)):
+                    with restore.progress_step("Import"):
+                        raise failure
+            self.assertTrue(messages[-1].startswith("FAILED: Import"))
+            self.assertFalse(any(message.startswith("DONE:") for message in messages))
+            self.assertFalse(any(thread.name == "restore-progress" for thread in threading.enumerate()))
+
+    def test_copy_progress_reports_exact_bytes_and_percentage(self):
+        path = self.root / "copy.sql"
+        messages = []
+        with patch.object(restore, "progress_log", side_effect=messages.append):
+            with path.open("wb") as stream:
+                with restore.progress_step("Copy", stream=stream, total=1048576):
+                    stream.write(b"x" * 1048576)
+                    stream.flush()
+        self.assertIn("written 1.0 MiB/1.0 MiB (100.0%)", messages[-1])
+
+    def test_import_progress_uses_real_subprocess_input_consumption(self):
+        path = self.root / "input.sql"
+        path.write_bytes(b"x" * 1048576)
+        messages = []
+        recovery = restore.Recovery(self.root, "8.4.7", self.config)
+        command = [sys.executable, "-c",
+                   "import sys, time; sys.stdin.buffer.read(524288); "
+                   "time.sleep(0.1); sys.stdin.buffer.read()"]
+        with patch.object(restore, "PROGRESS_INTERVAL", 0.005), \
+                patch.object(restore, "progress_log", side_effect=messages.append), \
+                patch.object(recovery, "mysql_command", return_value=command):
+            recovery.import_sql(path)
+        self.assertTrue(any(message.startswith("RUNNING:") and "(50.0%)" in message
+                            for message in messages), messages)
+        self.assertIn("SQL input read 1.0 MiB/1.0 MiB (100.0%)", messages[-1])
+
+    def test_progress_output_is_flushed_to_stderr(self):
+        output = io.StringIO()
+        with redirect_stderr(output), patch("builtins.print", wraps=print) as printer:
+            restore.progress_log("Starting restore")
+        self.assertIn("Starting restore", output.getvalue())
+        self.assertTrue(printer.call_args.kwargs["flush"])
+        self.assertIs(printer.call_args.kwargs["file"], output)
+
+    def test_execute_reports_all_stages_and_preserves_snapshot_copy(self):
+        _, metadata = self.snapshot("2026-10-31T06:00:00.000000Z")
+        window = self.window()
+        output = self.root / "restored.sql"
+        args = SimpleNamespace(
+            mysql_version="8.4.7", target_time="2026-10-31T07:00:00Z",
+            startup_timeout=180, backup_dir=self.root, binlog_dir=self.local,
+            binlog_index=None, output=output, database=[], table=[], role="primary",
+        )
+        messages = []
+        with patch.object(backup, "source_connection") as connection, \
+                patch.object(backup, "check_client"), patch.object(restore, "run"), \
+                patch.object(restore, "Recovery") as factory, \
+                patch.object(restore, "progress_log", side_effect=messages.append), \
+                patch("builtins.print"):
+            source = connection.return_value.__enter__.return_value
+            source.inspect.return_value = self.config
+            source.log_window.return_value = window
+            recovery = factory.return_value
+            recovery.find_cutoff.return_value = None
+
+            def check_copy(path):
+                self.assertEqual(backup.sha256(path), metadata["dump_sha256"])
+
+            recovery.import_sql.side_effect = check_copy
+            recovery.export.side_effect = lambda path, databases, tables: path.write_text("-- recovered\n")
+            restore.execute(args)
+            recovery.cleanup.assert_called_once()
+        self.assertEqual(output.read_text(), "-- recovered\n")
+        for stage in range(1, 10):
+            self.assertTrue(any(message.startswith("START: [{}/9]".format(stage)) for message in messages))
+            self.assertTrue(any(message.startswith("DONE: [{}/9]".format(stage)) for message in messages))
+        self.assertTrue(messages[-1].startswith("Recovery finished"))
+
+    def test_execute_failure_cleans_up_without_success_log(self):
+        self.snapshot("2026-10-31T06:00:00.000000Z")
+        window = self.window()
+        args = SimpleNamespace(
+            mysql_version="8.4.7", target_time="2026-10-31T07:00:00Z",
+            startup_timeout=180, backup_dir=self.root, binlog_dir=self.local,
+            binlog_index=None, output=self.root / "failed.sql", database=[], table=[], role="primary",
+        )
+        messages = []
+        with patch.object(backup, "source_connection") as connection, \
+                patch.object(backup, "check_client"), patch.object(restore, "run"), \
+                patch.object(restore, "Recovery") as factory, \
+                patch.object(restore, "progress_log", side_effect=messages.append):
+            source = connection.return_value.__enter__.return_value
+            source.inspect.return_value = self.config
+            source.log_window.return_value = window
+            recovery = factory.return_value
+            recovery.find_cutoff.return_value = None
+            recovery.import_sql.side_effect = backup.BackupError("import failed")
+            with self.assertRaisesRegex(backup.BackupError, "import failed"):
+                restore.execute(args)
+            recovery.cleanup.assert_called_once()
+            recovery.export.assert_not_called()
+        self.assertTrue(any(message.startswith("FAILED: [6/9]") for message in messages))
+        self.assertFalse(any(message.startswith("DONE: [6/9]") for message in messages))
+        self.assertFalse(any(message.startswith("Recovery finished") for message in messages))
+        self.assertFalse(args.output.exists())
 
 
 if __name__ == "__main__":

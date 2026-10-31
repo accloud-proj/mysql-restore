@@ -172,7 +172,7 @@ class Source:
 
         return [[unescape(field) for field in line.split("\t")] for line in text.splitlines()]
 
-    def inspect(self, role: str = "primary") -> dict:
+    def inspect(self, role: Optional[str] = "primary") -> dict:
         rows = self.query(
             "SELECT @@version, @@server_uuid, @@log_bin, @@gtid_mode, "
             "@@enforce_gtid_consistency, @@binlog_format, @@binlog_encryption, "
@@ -190,6 +190,8 @@ class Source:
             )
         if row[11] != "0":
             raise BackupError("binlog_transaction_compression must be OFF")
+        if role is None:
+            role = "replica" if self.query("SHOW REPLICA STATUS") else "primary"
         if role == "replica" and row[12:14] != ["1", "1"]:
             raise BackupError("Replica backups require log_replica_updates=ON and read_only=ON")
         try:
@@ -202,6 +204,15 @@ class Source:
             "character_set_server": row[8], "collation_server": row[9], "sql_mode": row[10],
             "role": role,
         }
+
+    def log_directory(self) -> Path:
+        rows = self.query("SELECT @@log_bin_basename")
+        if len(rows) != 1 or len(rows[0]) != 1 or not rows[0][0]:
+            raise BackupError("Cannot discover source binlog directory")
+        basename = Path(rows[0][0])
+        if not basename.is_absolute():
+            raise BackupError("Source binlog path must be absolute; configure the host path explicitly")
+        return basename.parent
 
     def current_time(self) -> dt.datetime:
         rows = self.query("SELECT DATE_FORMAT(UTC_TIMESTAMP(6), '%Y-%m-%dT%H:%i:%s.%fZ')")

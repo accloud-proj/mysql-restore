@@ -54,9 +54,16 @@ class ConfigurationCronTests(unittest.TestCase):
 
     def test_interactive_init_produces_private_files_and_no_plaintext_in_json(self):
         self.path.unlink()
-        answers = ["", "", "", "", "", "backups", "data", "", "", "", ""]
-        with patch("sys.stdin.isatty", return_value=True), patch("builtins.input", side_effect=answers), \
+        local = self.root / "data"
+        local.mkdir()
+        answers = ["", "", "", "backups", "", "", ""]
+        with patch("sys.stdin.isatty", return_value=True), \
+                patch("builtins.input", side_effect=answers) as prompts, \
+                patch.object(config, "source_connection") as connection, \
                 patch.object(config.getpass, "getpass", return_value="test-secret"):
+            source = connection.return_value.__enter__.return_value
+            source.inspect.return_value = {"mysql_version": "8.4.7", "role": "primary"}
+            source.log_directory.return_value = local
             generated = config.initialize(self.path)
         self.assertEqual(generated.schedule, "0 2 * * *")
         self.assertEqual(generated.max_backups, 0)
@@ -65,9 +72,151 @@ class ConfigurationCronTests(unittest.TestCase):
         self.assertIn("test-secret", generated.defaults_file.read_text())
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
         self.assertEqual(generated.defaults_file.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(generated.mysql_version, "8.4.7")
+        self.assertEqual(generated.binlog_dir, local)
+        saved = json.loads(self.path.read_text())
+        for key in ["mysql_version", "role", "binlog_dir", "binlog_index"]:
+            self.assertNotIn(key, saved)
+        self.assertEqual(prompts.call_count, 7)
+        self.assertNotIn("version", str(prompts.call_args_list))
+        self.assertNotIn("role", str(prompts.call_args_list))
+        self.assertNotIn("binlog", str(prompts.call_args_list))
         with patch("sys.stdin.isatty", return_value=True):
             with self.assertRaisesRegex(backup.BackupError, "already exists"):
                 config.initialize(self.path)
+
+    def automatic_config(self):
+        return config.parse_config(self.path, {
+            key: value for key, value in self.data.items()
+            if key not in {"mysql_version", "role", "binlog_dir", "binlog_index"}
+        })
+
+    def test_server_fields_are_optional_or_null_and_invalid_values_rejected(self):
+        loaded = self.automatic_config()
+        self.assertIsNone(loaded.mysql_version)
+        self.assertIsNone(loaded.role)
+        self.assertIsNone(loaded.binlog_dir)
+        for key in ["mysql_version", "role", "binlog_dir", "binlog_index"]:
+            for value in [None, ""]:
+                data = dict(self.data, **{key: value})
+                if value is None:
+                    config.parse_config(self.path, data)
+                else:
+                    with self.assertRaises(backup.BackupError):
+                        config.parse_config(self.path, data)
+
+    def test_source_discovery_resolves_current_version_role_and_paths(self):
+        local = self.root / "source-data"
+        local.mkdir()
+        loaded = self.automatic_config()
+        with patch.object(config, "source_connection") as connection:
+            source = connection.return_value.__enter__.return_value
+            source.inspect.return_value = {"mysql_version": "26.10.0", "role": "replica"}
+            source.log_directory.return_value = local
+            resolved = config.resolve_source(loaded)
+        source.inspect.assert_called_once_with(None)
+        self.assertEqual(resolved.mysql_version, "26.10.0")
+        self.assertEqual(resolved.role, "replica")
+        self.assertEqual(resolved.binlog_dir, local)
+        self.assertIsNone(resolved.binlog_index)
+        self.assertIsNone(loaded.mysql_version)
+
+    def test_explicit_configuration_remains_offline_and_overrides_paths(self):
+        with patch.object(config, "source_connection") as connection:
+            loaded = config.load_config(self.path)
+            self.assertIs(config.resolve_source(loaded), loaded)
+        connection.assert_not_called()
+        data = dict(self.data, mysql_version=None, role=None, binlog_index=None)
+        with patch.object(config, "source_connection") as connection:
+            source = connection.return_value.__enter__.return_value
+            source.inspect.return_value = {"mysql_version": "8.4.7", "role": "primary"}
+            resolved = config.resolve_source(config.parse_config(self.path, data))
+        source.log_directory.assert_not_called()
+        self.assertEqual(resolved.binlog_dir, self.root / "data")
+        self.assertIsNone(resolved.binlog_index)
+
+    def test_discovery_rejects_inaccessible_paths_nested_paths_and_version_mismatch(self):
+        loaded = self.automatic_config()
+        with patch.object(config, "source_connection") as connection:
+            source = connection.return_value.__enter__.return_value
+            source.inspect.return_value = {"mysql_version": "8.4.7", "role": "primary"}
+            source.log_directory.return_value = self.root / "missing-container-path"
+            with self.assertRaisesRegex(backup.BackupError, "Set binlog_dir"):
+                config.resolve_source(loaded)
+            loaded.backup_dir.mkdir()
+            source.log_directory.return_value = loaded.backup_dir
+            with self.assertRaisesRegex(backup.BackupError, "separate"):
+                config.resolve_source(loaded)
+            data = dict(self.data, role=None, mysql_version="8.4.6")
+            with self.assertRaisesRegex(backup.BackupError, "version differs"):
+                config.resolve_source(config.parse_config(self.path, data))
+
+    def test_init_discovery_failure_does_not_leave_credentials_or_configuration(self):
+        path = self.root / "failed-init.json"
+        with patch("sys.stdin.isatty", return_value=True), patch("builtins.input", return_value=""), \
+                patch.object(config.getpass, "getpass", return_value="test-secret"), \
+                patch.object(config, "source_connection", side_effect=backup.BackupError("Access denied")):
+            with self.assertRaisesRegex(backup.BackupError, "Access denied"):
+                config.initialize(path)
+        self.assertFalse(path.exists())
+        self.assertFalse(path.with_suffix(".client.cnf").exists())
+
+    def test_init_failure_preserves_reused_credentials(self):
+        path = self.root / "reuse.json"
+        client = self.root / "existing.client.cnf"
+        backup.write_client_file(client, {"password": "test-secret"})
+        original = client.read_bytes()
+        with patch("sys.stdin.isatty", return_value=True), patch("builtins.input", return_value=""), \
+                patch.object(config, "source_connection", side_effect=backup.BackupError("Access denied")), \
+                patch.object(config.getpass, "getpass") as password:
+            with self.assertRaisesRegex(backup.BackupError, "Access denied"):
+                config.initialize(path, client)
+        password.assert_not_called()
+        self.assertEqual(client.read_bytes(), original)
+        self.assertFalse(path.exists())
+
+    def test_cron_and_cleanup_do_not_require_live_source_for_automatic_config(self):
+        data = {key: value for key, value in self.data.items()
+                if key not in {"mysql_version", "role", "binlog_dir", "binlog_index"}}
+        backup.atomic_json(self.path, data)
+        for command in ["cron", "cleanup"]:
+            with patch("sys.argv", ["mysql-restore", "--config", str(self.path), command]), \
+                    patch.object(config, "source_connection") as connection, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(cli.main(), 0)
+            connection.assert_not_called()
+
+    def test_data_commands_receive_resolved_optional_configuration(self):
+        data = {key: value for key, value in self.data.items()
+                if key not in {"mysql_version", "role"}}
+        backup.atomic_json(self.path, data)
+        for command in ["check", "backup", "restore"]:
+            arguments = ["mysql-restore", "--config", str(self.path), command]
+            if command == "restore":
+                arguments += ["--target-time", "2026-11-01T00:01:00+08:00",
+                              "--output", str(self.root / "output.sql")]
+            with patch("sys.argv", arguments), patch.object(config, "source_connection") as connection, \
+                    patch.object(backup, "source_connection") as checked, \
+                    patch.object(backup, "check_client"), patch.object(backup, "local_log"), \
+                    patch.object(backup, "execute") as backed_up, patch.object(cli.restore, "execute") as restored, \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                source = connection.return_value.__enter__.return_value
+                source.inspect.return_value = {"mysql_version": "26.10.0", "role": "replica"}
+                live = checked.return_value.__enter__.return_value
+                live.inspect.return_value = source.inspect.return_value
+                live.databases.return_value = ["shop"]
+                live.log_window.return_value = {"files": [], "covered_until": "2026-11-01T00:01:00Z"}
+                (self.root / "data").mkdir(exist_ok=True)
+                (self.root / "data/mysql-bin.index").write_text("")
+                self.assertEqual(cli.main(), 0)
+            source.inspect.assert_called_once_with(None)
+            if command == "check":
+                live.inspect.assert_called_once_with("replica")
+            else:
+                options = (backed_up if command == "backup" else restored).call_args.args[0]
+                self.assertEqual(options.mysql_version, "26.10.0")
+                self.assertEqual(options.role, "replica")
+                self.assertEqual(options.binlog_dir, self.root / "data")
 
     def test_init_noninteractive_requires_manual_config(self):
         with patch("sys.stdin.isatty", return_value=False):

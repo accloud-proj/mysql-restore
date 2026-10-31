@@ -167,6 +167,15 @@ class BackupTests(unittest.TestCase):
             source.log_window("8.0.32")
         self.assertEqual(query.call_args_list[0].args[0], "SHOW MASTER STATUS")
 
+    def test_binlog_directory_is_queried_and_requires_absolute_path(self):
+        source = backup.Source(self.root / "client.cnf")
+        with patch.object(source, "query", return_value=[["/var/lib/mysql/binlog"]]):
+            self.assertEqual(source.log_directory(), Path("/var/lib/mysql"))
+        for rows in [[], [[""]], [["binlog"]], [["/var/lib/mysql/binlog", "extra"]]]:
+            with patch.object(source, "query", return_value=rows):
+                with self.assertRaises(backup.BackupError):
+                    source.log_directory()
+
     def test_replica_requires_local_replication_binlogs_and_readonly(self):
         source = backup.Source(self.root / "client.cnf")
         row = ["8.4.7", SOURCE_UUID, "1", "ON", "ON", "ROW", "0", "0",
@@ -177,6 +186,23 @@ class BackupTests(unittest.TestCase):
             with patch.object(source, "query", return_value=[row[:12] + values]):
                 with self.assertRaisesRegex(backup.BackupError, "log_replica_updates"):
                     source.inspect("replica")
+
+    def test_auto_role_uses_replication_channels_and_enforces_replica_requirements(self):
+        source = backup.Source(self.root / "client.cnf")
+        row = ["8.4.7", SOURCE_UUID, "1", "ON", "ON", "ROW", "0", "0",
+               "utf8mb4", "utf8mb4_0900_ai_ci", "", "0", "1", "1"]
+        for channels, expected in [([], "primary"), ([["channel"]], "replica"),
+                                   ([["first"], ["second"]], "replica")]:
+            with patch.object(source, "query", side_effect=[[row], channels]) as query:
+                self.assertEqual(source.inspect(None)["role"], expected)
+            self.assertEqual(query.call_args_list[1].args[0], "SHOW REPLICA STATUS")
+        with patch.object(source, "query", side_effect=[[row[:12] + ["0", "1"]], [["channel"]]]):
+            with self.assertRaisesRegex(backup.BackupError, "log_replica_updates"):
+                source.inspect(None)
+        with patch.object(source, "query", side_effect=[
+                [row], backup.BackupError("REPLICATION CLIENT denied")]):
+            with self.assertRaisesRegex(backup.BackupError, "denied"):
+                source.inspect(None)
 
     def test_multisource_gtid_newlines_do_not_create_fake_result_rows(self):
         source = backup.Source(self.root / "client.cnf")

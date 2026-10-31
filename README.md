@@ -31,8 +31,10 @@ uv sync
 uv run mysql-restore init
 ```
 
-Enter the source connection, exact MySQL version, backup/binlog paths, nightly
-schedule and retention count. Password input is hidden.
+Enter the source connection, backup destination, nightly schedule and retention
+count. Password input is hidden. Version, role and binlog paths are discovered
+from the source without prompts. Setup validates the source before saving files;
+on failure it removes newly created credentials, never an existing credential file.
 Setup creates `mysql-restore.json` and a private `mysql-restore.client.cnf`.
 Never commit real credentials.
 
@@ -43,11 +45,11 @@ Important settings:
 
 | Field           | Meaning                                                       |
 | --------------- | ------------------------------------------------------------- |
-| `role`          | `primary` or `replica`                                        |
-| `mysql_version` | Exact source version                                          |
+| `role`          | Optional; detected from replication channels; override with `primary`/`replica` |
+| `mysql_version` | Optional; queried from source; explicit versions must match |
 | `backup_dir`    | Full-backup destination                                       |
-| `binlog_dir`    | Existing local source binlog directory                        |
-| `binlog_index`  | Optional index file; `null` queries the source log list       |
+| `binlog_dir`    | Optional; discovered server directory; override with host path |
+| `binlog_index`  | Optional local index; omitted/`null` uses the source log list |
 | `schedule`      | Cron schedule, default `0 2 * * *`                            |
 | `max_backups`   | Positive count to retain; `0`/`null`/omitted disables cleanup |
 | `log_file`      | Scheduled-backup log                                          |
@@ -55,6 +57,14 @@ Important settings:
 Configuration paths are relative to the configuration file. Keep backup and
 source-log directories separate and non-nested. For Docker sources, use the
 host bind-mount path.
+
+Omit automatic fields or set them to `null`. New configurations do not persist
+discovered values: `check`, `backup` and `restore` resolve them on each run.
+Cron generation and cleanup remain offline.
+Server paths cannot reveal Docker mount mappings. Inaccessible paths produce an
+explicit error; use the template and set `binlog_dir` (and `binlog_index` if needed)
+to the correct host paths. With an explicit directory and no index, logs are
+listed from the source.
 
 ## 2. Check and back up
 

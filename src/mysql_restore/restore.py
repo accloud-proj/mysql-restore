@@ -2,6 +2,7 @@
 """Restore a GTID snapshot in an isolated Docker container and export a PITR dump."""
 
 import argparse
+from contextlib import contextmanager
 import datetime as dt
 import os
 from pathlib import Path
@@ -10,9 +11,10 @@ import secrets
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import uuid
-from typing import Iterable, Optional
+from typing import BinaryIO, Iterable, Iterator, Optional
 
 from .backup import (
     BackupError, SYSTEM_DATABASES, UTC, parse_time, quote_identifier, read_json,
@@ -24,6 +26,57 @@ from .backup import (
 GTID_HEADER = re.compile(r"^#\d{6}\s+\d{1,2}:\d{2}:\d{2}.*\b(?:GTID|Anonymous_GTID)\b")
 COMMIT_TIME = re.compile(r"\bimmediate_commit_timestamp=(\d+)")
 AT_POSITION = re.compile(r"^# at (\d+)$")
+PROGRESS_INTERVAL = 5.0
+
+
+def progress_log(message: str) -> None:
+    print("[{}] {}".format(dt.datetime.now().astimezone().isoformat(timespec="seconds"), message),
+          file=sys.stderr, flush=True)
+
+
+@contextmanager
+def progress_step(label: str, *, stream: Optional[BinaryIO] = None,
+                  total: Optional[int] = None, reading: bool = False) -> Iterator[None]:
+    started = time.monotonic()
+    stopped = threading.Event()
+    errors = []
+
+    def status() -> str:
+        detail = "{:.1f}s elapsed".format(time.monotonic() - started)
+        if stream is not None:
+            descriptor = stream.fileno()
+            count = os.lseek(descriptor, 0, os.SEEK_CUR) if reading else os.fstat(descriptor).st_size
+            detail += "; {} {:.1f} MiB".format("SQL input read" if reading else "written", count / 1048576)
+            if total is not None:
+                percentage = min(100, count * 100 / total) if total else 100
+                detail += "/{:.1f} MiB ({:.1f}%)".format(total / 1048576, percentage)
+        return detail
+
+    def monitor() -> None:
+        while not stopped.wait(PROGRESS_INTERVAL):
+            try:
+                progress_log("RUNNING: {} ({})".format(label, status()))
+            except OSError as exc:
+                errors.append(exc)
+                progress_log("ERROR: Progress monitoring failed: " + str(exc))
+                return
+
+    progress_log("START: " + label)
+    worker = threading.Thread(target=monitor, name="restore-progress", daemon=True)
+    worker.start()
+    try:
+        yield
+    except BaseException:
+        stopped.set()
+        worker.join()
+        progress_log("FAILED: {} ({:.1f}s elapsed)".format(label, time.monotonic() - started))
+        raise
+    else:
+        stopped.set()
+        worker.join()
+        if errors:
+            raise errors[0]
+        progress_log("DONE: {} ({})".format(label, status()))
 
 
 def select_snapshot(directory: Path, target: dt.datetime, version: str) -> tuple:
@@ -64,9 +117,10 @@ def select_logs(local: Path, metadata: dict, target: dt.datetime, window: dict,
         offsets = [names.index(name) for name in expected]
         if offsets != list(range(offsets[0], offsets[0] + len(offsets))):
             raise BackupError("Configured binlog index has a gap or incorrect order")
-    for entry in selected:
-        path = local_log(local, entry["name"], entry["size"])
-        entry["sha256"] = sha256(path, entry["size"])
+    for number, entry in enumerate(selected, 1):
+        with progress_step("Hashing binlog {}/{}: {}".format(number, len(selected), entry["name"])):
+            path = local_log(local, entry["name"], entry["size"])
+            entry["sha256"] = sha256(path, entry["size"])
     if not 4 <= metadata["binlog_position"] <= selected[0]["size"]:
         raise BackupError("Snapshot binlog position is outside the source file")
     if "anchor_sha256" not in metadata:
@@ -78,10 +132,11 @@ def select_logs(local: Path, metadata: dict, target: dt.datetime, window: dict,
 
 
 def verify_logs(local: Path, entries: list) -> None:
-    for entry in entries:
-        path = local_log(local, entry["name"], entry["size"])
-        if sha256(path, entry["size"]) != entry["sha256"]:
-            raise BackupError("Source binlog changed during recovery: " + entry["name"])
+    for number, entry in enumerate(entries, 1):
+        with progress_step("Verifying binlog {}/{}: {}".format(number, len(entries), entry["name"])):
+            path = local_log(local, entry["name"], entry["size"])
+            if sha256(path, entry["size"]) != entry["sha256"]:
+                raise BackupError("Source binlog changed during recovery: " + entry["name"])
 
 
 def commit_boundaries(lines, *, initial_position: int = 4):
@@ -172,6 +227,7 @@ class Recovery:
             "--collation-server=" + self.metadata["collation_server"],
             "--sql-mode=" + self.metadata["sql_mode"],
         ])
+        progress_log("Container started; waiting for MySQL readiness (timeout {}s)".format(timeout))
         deadline = time.monotonic() + timeout
         last_error = ""
         while time.monotonic() < deadline:
@@ -207,11 +263,11 @@ class Recovery:
             if distribution is None or distribution.group(1) != self.version:
                 raise BackupError("Container mysqlbinlog version mismatch: " + actual.strip())
             self.binlog_in_container = True
-            print("Using official image mysqlbinlog")
+            progress_log("Using official image mysqlbinlog")
         elif presence == "absent":
             check_client("mysqlbinlog", self.version)
             self.binlog_in_container = False
-            print("Official image has no mysqlbinlog; using matching host mysqlbinlog")
+            progress_log("Official image has no mysqlbinlog; using matching host mysqlbinlog")
         else:
             raise BackupError("Unexpected mysqlbinlog availability response: " + presence)
 
@@ -227,7 +283,9 @@ class Recovery:
 
     def import_sql(self, path: Path) -> None:
         with path.open("rb") as stream:
-            run(self.mysql_command(), stdin=stream)
+            with progress_step("Importing " + path.name, stream=stream,
+                               total=os.fstat(stream.fileno()).st_size, reading=True):
+                run(self.mysql_command(), stdin=stream)
 
     def binlog_command(self, name: str, position: int, *, decode: bool,
                        stop: Optional[int] = None) -> list:
@@ -263,11 +321,15 @@ class Recovery:
                 # Decode to disk rather than RAM; validate the process before trusting output.
                 decoded = self.work / "decoded.txt"
                 with decoded.open("wb") as stream:
-                    run(self.binlog_command(entry["name"], position, decode=True, stop=entry["size"]),
-                        stdout=stream)
-                with decoded.open(encoding="utf-8", errors="surrogateescape") as stream:
-                    for event_pos, committed in commit_boundaries(stream, initial_position=position):
-                        yield entry["name"], event_pos, committed
+                    with progress_step("Decoding binlog {}/{}: {}".format(
+                            index + 1, len(entries), entry["name"]), stream=stream):
+                        run(self.binlog_command(entry["name"], position, decode=True, stop=entry["size"]),
+                            stdout=stream)
+                        stream.flush()
+                with progress_step("Scanning transaction timestamps: " + entry["name"]):
+                    with decoded.open(encoding="utf-8", errors="surrogateescape") as stream:
+                        for event_pos, committed in commit_boundaries(stream, initial_position=position):
+                            yield entry["name"], event_pos, committed
                 decoded.unlink()
 
         return plan_replay(events(), target_us)
@@ -281,12 +343,17 @@ class Recovery:
                 stop = cutoff[1] if at_cutoff else entry["size"]
                 if stop == position:
                     break
-                run(self.binlog_command(entry["name"], position, decode=False, stop=stop),
-                    stdout=stream)
+                with progress_step("Preparing replay {}/{}: {} (positions {}-{})".format(
+                        index + 1, len(entries), entry["name"], position, stop), stream=stream):
+                    run(self.binlog_command(entry["name"], position, decode=False, stop=stop),
+                        stdout=stream)
+                    stream.flush()
                 if at_cutoff:
                     break
         if replay.stat().st_size:
             self.import_sql(replay)
+        else:
+            progress_log("No binlog transactions need replay at the requested target")
         replay.unlink()
 
     def export(self, output: Path, databases: list, tables: list) -> None:
@@ -326,8 +393,9 @@ class Recovery:
                     if len(parts) != 2:
                         raise BackupError("Unexpected database definition response")
                     stream.write((parts[1] + ";\nUSE " + quote_identifier(selected[0]) + ";\n").encode("utf-8"))
-                run(command, stdout=stream)
-                stream.flush()
+                with progress_step("Exporting recovered SQL", stream=stream):
+                    run(command, stdout=stream)
+                    stream.flush()
                 os.fsync(stream.fileno())
             # Atomic, no-clobber publication, even if another process creates output meanwhile.
             os.link(temporary, output)
@@ -374,8 +442,12 @@ def execute(args) -> None:
     from .backup import backup_lock
 
     # Protect snapshot selection/copy from automatic or standalone retention cleanup.
+    started = time.monotonic()
+    progress_log("Recovery requested: target={}, output={}".format(args.target_time, args.output))
+    progress_log("Acquiring backup directory lock")
     with backup_lock(args.backup_dir.expanduser().resolve(strict=True)):
         _execute(args)
+    progress_log("Recovery finished ({:.1f}s total)".format(time.monotonic() - started))
 
 
 def _execute(args) -> None:
@@ -394,45 +466,61 @@ def _execute(args) -> None:
         raise BackupError("Output already exists; refusing to overwrite it")
     if not output.parent.is_dir():
         raise BackupError("Output parent directory does not exist")
-    folder, metadata, dump = select_snapshot(directory, target, version)
-    with source_connection(args) as source:
-        check_client("mysql", version)
-        config = source.inspect(args.role)
-        for key in ("source_uuid", "mysql_version"):
-            if metadata[key] != config[key]:
-                raise BackupError("Snapshot and live source belong to different instances/versions")
-        window = source.log_window(version)
-    entries = select_logs(local, metadata, target, window, args.binlog_index)
-    run(["docker", "info", "--format", "{{.ServerVersion}}"])
+    with progress_step("[1/9] Selecting and verifying full backup"):
+        folder, metadata, dump = select_snapshot(directory, target, version)
+    progress_log("Using snapshot: " + str(folder))
+    with progress_step("[2/9] Checking live source and binlog coverage"):
+        with source_connection(args) as source:
+            check_client("mysql", version)
+            config = source.inspect(args.role)
+            for key in ("source_uuid", "mysql_version"):
+                if metadata[key] != config[key]:
+                    raise BackupError("Snapshot and live source belong to different instances/versions")
+            window = source.log_window(version)
+        entries = select_logs(local, metadata, target, window, args.binlog_index)
+        run(["docker", "info", "--format", "{{.ServerVersion}}"])
+    progress_log("Binlogs selected: {} files, {:.1f} MiB inspected".format(
+        len(entries), sum(entry["size"] for entry in entries) / 1048576,
+    ))
     with tempfile.TemporaryDirectory(prefix="mysql-pitr-") as name:
         work = Path(name)
         snapshot = work / dump.name
-        shutil.copyfile(dump, snapshot)
-        if sha256(snapshot) != metadata["dump_sha256"]:
-            raise BackupError("Snapshot changed during preparation")
+        with dump.open("rb") as source, snapshot.open("wb") as destination:
+            with progress_step("[3/9] Copying full backup", stream=destination,
+                               total=os.fstat(source.fileno()).st_size):
+                shutil.copyfileobj(source, destination, length=1024 * 1024)
+                destination.flush()
+        with progress_step("Verifying prepared full backup"):
+            if sha256(snapshot) != metadata["dump_sha256"]:
+                raise BackupError("Snapshot changed during preparation")
         recovery = Recovery(work, version, metadata, local)
         primary_error = None
         try:
-            recovery.start(args.startup_timeout)
-            cutoff = recovery.find_cutoff(entries, metadata["binlog_position"], target)
-            verify_logs(local, entries)
-            print("Using snapshot: " + str(folder))
-            print("Replay boundary: " + (str(cutoff) if cutoff else "inspected committed log position"))
-            recovery.import_sql(snapshot)
-            recovery.replay(entries, metadata["binlog_position"], cutoff)
-            verify_logs(local, entries)
-            recovery.export(output, args.database, args.table)
+            with progress_step("[4/9] Starting mysql:{} (Docker may pull the image)".format(version)):
+                recovery.start(args.startup_timeout)
+            with progress_step("[5/9] Locating target transaction boundary"):
+                cutoff = recovery.find_cutoff(entries, metadata["binlog_position"], target)
+                verify_logs(local, entries)
+            progress_log("Replay boundary: " + (str(cutoff) if cutoff else "inspected committed log position"))
+            with progress_step("[6/9] Restoring full backup"):
+                recovery.import_sql(snapshot)
+            with progress_step("[7/9] Replaying binlog transactions"):
+                recovery.replay(entries, metadata["binlog_position"], cutoff)
+            with progress_step("[8/9] Verifying binlogs and exporting recovered data"):
+                verify_logs(local, entries)
+                recovery.export(output, args.database, args.table)
         except BaseException as exc:
             primary_error = exc
             raise
         finally:
             try:
-                recovery.cleanup()
+                with progress_step("[9/9] Removing temporary container and data volume"):
+                    recovery.cleanup()
             except BackupError as exc:
                 if primary_error is None:
                     raise
                 print("ERROR: " + str(exc), file=sys.stderr)
-    print("Recovery export completed: " + str(output))
+    print("Recovery export completed: " + str(output), flush=True)
 
 
 def main() -> int:

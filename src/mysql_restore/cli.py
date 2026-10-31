@@ -7,7 +7,7 @@ import sys
 
 from . import backup, cron, restore
 from .backup import BackupError
-from .config import initialize, load_config, publish_text
+from .config import initialize, load_config, publish_text, resolve_source
 
 
 def parser() -> argparse.ArgumentParser:
@@ -48,6 +48,14 @@ def main() -> int:
             print("Next: mysql-restore --config {} check".format(config.path))
             return 0
         config = load_config(args.config)
+        if args.command in {"check", "backup", "restore"}:
+            if args.command == "restore":
+                with restore.progress_step("Resolving source configuration"):
+                    config = resolve_source(config)
+            else:
+                config = resolve_source(config)
+            if config.mysql_version is None or config.role is None or config.binlog_dir is None:
+                raise BackupError("Source configuration discovery did not resolve required fields")
         options = config.arguments()
         if args.command == "check":
             with backup.source_connection(options) as source:
