@@ -106,6 +106,13 @@ Time requires an explicit timezone. The output parent must exist and the output
 file must not exist. Temporary containers/volumes are removed after recovery.
 Replica targets use local replica commit time, including replication lag.
 
+Recovery logs steps to stderr automatically, with elapsed-time updates every
+five seconds. Copying shows byte percentages; binlog processing shows file
+counts; decoding/exporting shows bytes written. Import percentages measure SQL
+input consumption, **not database execution**: wait for `DONE`, even at 100%.
+Steps without measurable percentages show a running status instead.
+Use `2>restore.log` to save the logs.
+
 ## 5. Retain or clean backups
 
 Set `"max_backups": 7` to automatically retain the latest seven snapshots after
@@ -133,3 +140,7 @@ Cleanup deletes old full backups only, never source binlogs.
 uv run mysql-restore --help
 uv run mysql-restore restore --help
 ```
+
+## LICENSE
+
+[BSD-3-Clause](LICENSE)

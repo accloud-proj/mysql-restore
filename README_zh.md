@@ -149,6 +149,10 @@ uv run mysql-restore restore \
 
 工具自动读取配置中的备份目录和原始 binlog，恢复完成后清理临时容器与数据卷。官方镜像内有 `mysqlbinlog` 就优先使用，没有才使用宿主机工具。
 
+恢复默认实时输出步骤日志（无需额外参数）：备份选择、日志校验、启动容器、定位时间点、导入全量、重放 binlog、导出和清理。耗时步骤每 5 秒显示已用时间；复制显示字节百分比，binlog 显示文件序号，解析/导出显示已写入大小。
+
+导入百分比表示 **SQL 输入读取进度，不是数据库执行进度**；即使读取达到 100%，仍需等待步骤显示 `DONE`。无法准确计算百分比的步骤只显示运行状态，不估算虚假进度。日志输出到 stderr，重定向保存可使用 `2>restore.log`。
+
 ## 6. 保留与清理备份
 
 例如在配置中设置 `"max_backups": 7`，每次新备份成功后自动保留最新 7 份。
@@ -179,3 +183,7 @@ uv run mysql-restore cleanup --max-backups 7
 uv run mysql-restore --help
 uv run mysql-restore restore --help
 ```
+
+## LICENSE
+
+[BSD-3-Clause](LICENSE)
