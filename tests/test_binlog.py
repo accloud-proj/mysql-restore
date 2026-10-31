@@ -10,7 +10,7 @@ from mysql_restore import backup, restore
 
 def binlog_fixture(*, in_use: bool) -> bytes:
     body = (struct.pack("<H", 4) + b"8.4.7".ljust(50, b"\0")
-            + struct.pack("<I", 1) + bytes([19]) + bytes([19] * 41) + bytes([1]))
+            + struct.pack("<I", 1) + bytes([19]) + bytes([56, 13, 0] + [0] * 38) + bytes([1]))
     length = 19 + len(body) + 4
     header = struct.pack("<IBIIIH", 1, 15, 1, length, length + 4, 0)
     event = header + body
@@ -123,7 +123,7 @@ class BinlogIntegrityTests(unittest.TestCase):
         self.assertNotEqual(backup.binlog_digests(self.path, size), expected)
 
     def test_invalid_format_headers_are_not_normalized(self):
-        for offset, value in [(13, 0), (23, 3), (80, 20), (0, 0)]:
+        for offset, value in [(13, 0), (23, 3), (79, 20), (0, 0)]:
             with self.subTest(offset=offset):
                 changed = bytearray(self.original)
                 changed[offset] = value
@@ -139,6 +139,16 @@ class BinlogIntegrityTests(unittest.TestCase):
         self.path.write_bytes(changed)
         self.assertEqual(backup.binlog_digests(self.path, self.size, legacy=True),
                          (backup.sha256(self.path, self.size),))
+
+    def test_common_header_length_is_not_first_event_post_header_length(self):
+        self.assertEqual(self.original[79], 19)
+        self.assertEqual(self.original[80], 56)
+        digests = backup.binlog_digests(self.path, self.size, legacy=True)
+        self.assertIn(backup.sha256(self.path), digests)
+        changed = bytearray(self.original)
+        changed[80] = 0
+        self.path.write_bytes(changed)
+        self.assertNotEqual(backup.binlog_digests(self.path, self.size, legacy=True), digests)
 
 
 if __name__ == "__main__":

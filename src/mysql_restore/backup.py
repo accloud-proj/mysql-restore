@@ -63,7 +63,7 @@ def binlog_digests(path: Path, size: int, *, legacy: bool = False) -> tuple[str,
     if size < 4:
         raise BackupError("Invalid binlog hash boundary")
     with path.open("rb") as stream:
-        prefix_size = min(size, 81)
+        prefix_size = min(size, 80)
         prefix = bytearray(stream.read(prefix_size))
         if len(prefix) != prefix_size:
             raise BackupError("Binlog was truncated: " + str(path))
@@ -72,8 +72,10 @@ def binlog_digests(path: Path, size: int, *, legacy: bool = False) -> tuple[str,
         has_fde = len(prefix) >= 23 and prefix[8] == 15
         if has_fde:
             event_size = int.from_bytes(prefix[13:17], "little")
-            if (len(prefix) < 81 or not 76 <= event_size <= size - 4
-                    or prefix[23:25] != b"\x04\x00" or prefix[80] != 19):
+            # Common-header length follows magic(4), header(19), version(2),
+            # server version(50), and creation timestamp(4): file offset 79.
+            if (len(prefix) < 80 or not 76 <= event_size <= size - 4
+                    or prefix[23:25] != b"\x04\x00" or prefix[79] != 19):
                 raise BackupError("Invalid binlog format description: " + str(path))
             # MySQL clears this bit at close/rotation; FDE CRC32 excludes it.
             # File offset = 4-byte magic + 17-byte event-header flags offset.
