@@ -2,6 +2,7 @@
 
 import argparse
 import os
+from importlib.metadata import version
 from pathlib import Path
 import sys
 
@@ -12,6 +13,9 @@ from .config import initialize, load_config, publish_text, resolve_source
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description="Mysqldump GTID backup and direct-binlog Docker PITR")
+    release = (Path(getattr(sys, "_MEIPASS")) / "version.txt").read_text().strip() \
+        if getattr(sys, "frozen", False) else version("mysql-restore")
+    result.add_argument("--version", action="version", version="mysql-restore " + release)
     result.add_argument("--config", type=Path, default=Path("mysql-restore.json"))
     commands = result.add_subparsers(dest="command", required=True)
     init = commands.add_parser("init", help="Interactively generate private configuration")

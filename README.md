@@ -10,7 +10,7 @@ inside Docker. Run on a primary or read-only replica host.
 
 ## Before you start
 
-- Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and Docker.
+- Install Docker; source checkout usage also requires [uv](https://docs.astral.sh/uv/getting-started/installation/).
 - Use Oracle MySQL 8.0.32+ with matching `mysql`, `mysqldump` and `mysqlbinlog` tools.
 - Ask your database administrator to enable GTID and ROW binlogs and provide
   a backup account. Replicas also need `log_replica_updates` and read-only mode.
@@ -18,6 +18,22 @@ inside Docker. Run on a primary or read-only replica host.
   and avoid schema changes during backups.
 
 ## 1. Install and configure
+
+### Option A: Download a binary
+
+Download and extract your platform's archive from
+[Releases](https://github.com/accloud-proj/mysql-restore/releases), then run:
+
+```sh
+./mysql-restore init
+```
+
+No Python or uv required. Builds cover Windows x86_64 and Linux/macOS
+x86_64 and ARM64. Linux requires Ubuntu 22.04 or compatible; macOS requires 15+.
+On Windows use `.\mysql-restore.exe`. Install MySQL clients and Docker separately
+and make them available in PATH.
+
+### Option B: Run from source
 
 ```sh
 git clone https://github.com/accloud-proj/mysql-restore.git
@@ -29,8 +45,12 @@ uv run mysql-restore init
 Enter the connection, credentials, backup directory, schedule and retention count.
 Version, role and log directory are detected automatically.
 
+Commands below use the source form. For binaries replace `uv run mysql-restore`
+with `./mysql-restore` (Windows: `.\mysql-restore.exe`).
+
 Setup creates `mysql-restore.json` and `mysql-restore.client.cnf`.
 Do not share or commit these files.
+On Windows restrict access to credentials using folder permissions.
 
 For manual setup, use the [configuration template](config.example.json).
 For Docker sources, set `binlog_dir` to the host log directory.
@@ -46,6 +66,10 @@ uv run mysql-restore backup
 Schedule backups only after these succeed. Keep each complete backup directory.
 
 ## 3. Schedule automatic backups
+
+Cron applies to Linux/macOS. On Windows use Task Scheduler to run
+`mysql-restore.exe --config ABSOLUTE_CONFIG_PATH backup`, with absolute paths
+in the configuration.
 
 Install into the current user's crontab:
 
@@ -113,6 +137,18 @@ Only old full backups are deleted, never source binlogs.
 
 See `uv run mysql-restore --help` for other options.
 Place `--config PATH` before the subcommand to select another configuration.
+
+## Build and release
+
+Versions and tags use `yyyy.mm[.revision]`, e.g. `2026.11` or `2026.11.1`;
+use two-digit months and no `v` prefix.
+
+- Push a new tag to build all supported platforms and publish GitHub Release assets.
+- Or select Actions → **Build release binaries** → **Run workflow**, choose a
+  branch and enter a version. Existing tags must match the selected commit.
+- Local build: `uv sync --group build`, then
+  `uv run --group build python scripts/package.py --version 2026.11.1`.
+  Archives are in `dist/`, built for the current platform and architecture only.
 
 ## License
 

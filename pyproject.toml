@@ -1,6 +1,6 @@
 [project]
 name = "mysql-restore"
-version = "0.1.0"
+version = "2026.11"
 description = "Mysqldump GTID backups and direct-binlog Docker point-in-time recovery"
 readme = "README.md"
 authors = [
@@ -8,6 +8,9 @@ authors = [
 ]
 requires-python = ">=3.14"
 dependencies = []
+
+[dependency-groups]
+build = ["pyinstaller>=6.16,<7"]
 
 [project.scripts]
 mysql-restore = "mysql_restore:main"

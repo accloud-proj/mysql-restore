@@ -1,4 +1,5 @@
 import datetime as dt
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -107,7 +108,8 @@ class BackupTests(unittest.TestCase):
     def test_private_client_file_escapes_password(self):
         path = self.root / "client.cnf"
         backup.write_client_file(path, {"password": 'space # ";\\value'})
-        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        if os.name != "nt":
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         self.assertEqual(path.read_text(), '[client]\npassword="space # \\";\\\\value"\n')
         with self.assertRaises(backup.BackupError):
             backup.quote_option("secret\npassword=another")
@@ -169,8 +171,8 @@ class BackupTests(unittest.TestCase):
 
     def test_binlog_directory_is_queried_and_requires_absolute_path(self):
         source = backup.Source(self.root / "client.cnf")
-        with patch.object(source, "query", return_value=[["/var/lib/mysql/binlog"]]):
-            self.assertEqual(source.log_directory(), Path("/var/lib/mysql"))
+        with patch.object(source, "query", return_value=[[str(self.local / "binlog")]]):
+            self.assertEqual(source.log_directory(), self.local)
         for rows in [[], [[""]], [["binlog"]], [["/var/lib/mysql/binlog", "extra"]]]:
             with patch.object(source, "query", return_value=rows):
                 with self.assertRaises(backup.BackupError):

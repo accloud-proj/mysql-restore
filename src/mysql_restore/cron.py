@@ -13,14 +13,17 @@ from .config import Config
 
 
 def backup_command(config: Config) -> str:
+    if os.name == "nt":
+        raise BackupError("cron is unavailable on Windows; schedule the backup command with Task Scheduler")
     if not config.log_file.parent.is_dir():
         raise BackupError("Cron log parent directory must exist")
-    command = shlex.join([
-        os.path.abspath(sys.executable), "-m", "mysql_restore",
-        "--config", str(config.path), "backup",
-    ])
+    frozen = getattr(sys, "frozen", False)
+    executable = [os.path.abspath(sys.executable)]
+    if not frozen:
+        executable += ["-m", "mysql_restore"]
+    command = shlex.join(executable + ["--config", str(config.path), "backup"])
     # Ensure source checkout/editable installs work independent of cron's working directory.
-    source_dir = Path(__file__).resolve().parents[1]
+    source_dir = config.path.parent if frozen else Path(__file__).resolve().parents[1]
     command = "export PATH=" + shlex.quote(os.environ.get("PATH", "/usr/bin:/bin")) + "; cd " \
         + shlex.quote(str(source_dir)) + " && " + command
     command += " >> " + shlex.quote(str(config.log_file)) + " 2>&1"
@@ -30,6 +33,8 @@ def backup_command(config: Config) -> str:
 
 
 def render(config: Config, script: Optional[Path] = None) -> str:
+    if os.name == "nt":
+        raise BackupError("cron is unavailable on Windows; schedule the backup command with Task Scheduler")
     identifier = hashlib.sha256(str(config.path).encode()).hexdigest()[:16]
     command = shlex.quote(str(script)) if script is not None else backup_command(config)
     if any(character in command for character in "\x00\r\n"):

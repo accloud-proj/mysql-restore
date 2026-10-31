@@ -4,7 +4,7 @@
 import argparse
 import contextlib
 import datetime as dt
-import fcntl
+import errno
 import getpass
 import hashlib
 import json
@@ -17,6 +17,11 @@ import tempfile
 import uuid
 from typing import Iterator
 from typing import Optional
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 
 UTC = dt.timezone.utc
@@ -122,15 +127,34 @@ def read_json(path: Path) -> dict:
 
 @contextlib.contextmanager
 def backup_lock(directory: Path) -> Iterator[None]:
-    with (directory / ".backup.lock").open("a") as stream:
+    with (directory / ".backup.lock").open("a+b") as stream:
+        if os.name == "nt":
+            if stream.seek(0, os.SEEK_END) == 0:
+                stream.write(b"\0")
+                stream.flush()
+            stream.seek(0)
         try:
-            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
+            if os.name == "nt":
+                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                raise
             raise BackupError("Another backup job is using this directory") from exc
         try:
             yield
         finally:
-            fcntl.flock(stream, fcntl.LOCK_UN)
+            if os.name == "nt":
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(stream, fcntl.LOCK_UN)
+
+
+def unsafe_permissions(path: Path, mask: int) -> bool:
+    # Windows chmod exposes read-only flags, not ACL privacy.
+    return os.name != "nt" and bool(path.stat().st_mode & mask)
 
 
 def run(command: list, *, stdout=None, stdin=None, env=None, include_stderr=False) -> str:
@@ -431,7 +455,7 @@ def source_connection(args) -> Iterator[Source]:
             if getattr(args, "password", None) is not None:
                 raise BackupError("--password and --defaults-file are mutually exclusive")
             original = args.defaults_file.expanduser().resolve(strict=True)
-            if not original.is_file() or original.stat().st_mode & 0o077:
+            if not original.is_file() or unsafe_permissions(original, 0o077):
                 raise BackupError("--defaults-file must be a private file (chmod 600)")
             content = original.read_text(encoding="utf-8")
             # Explicit connection fields must not discard configured TLS settings.

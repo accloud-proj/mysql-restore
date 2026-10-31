@@ -7,3 +7,4 @@ mysql-restore.json
 backups/
 *.log
 dist/
+build/

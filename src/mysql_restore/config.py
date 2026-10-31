@@ -13,6 +13,7 @@ from typing import Optional
 
 from .backup import (
     BackupError, quote_option, read_json, source_connection, supported_version, write_client_file,
+    unsafe_permissions,
 )
 
 
@@ -149,7 +150,7 @@ def resolve_source(config: Config) -> Config:
 
 def load_config(path: Path) -> Config:
     path = path.expanduser().resolve(strict=True)
-    if path.stat().st_mode & 0o022:
+    if unsafe_permissions(path, 0o022):
         raise BackupError("Configuration must not be writable by group/others")
     return parse_config(path, read_json(path))
 
@@ -160,7 +161,7 @@ def publish_text(path: Path, text: str, mode: int = 0o600) -> None:
     temporary = Path(name)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            os.fchmod(stream.fileno(), mode)
+            os.chmod(temporary, mode)
             stream.write(text)
             stream.flush()
             os.fsync(stream.fileno())
@@ -199,7 +200,7 @@ def initialize(path: Path, defaults_file: Optional[Path] = None) -> Config:
     created_client = False
     try:
         if defaults_file:
-            if not client.is_file() or client.stat().st_mode & 0o077:
+            if not client.is_file() or unsafe_permissions(client, 0o077):
                 raise BackupError("Existing MySQL client file must have mode 600")
         else:
             if client.exists() or client.is_symlink():

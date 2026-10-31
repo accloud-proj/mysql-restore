@@ -40,9 +40,10 @@ class ConfigurationCronTests(unittest.TestCase):
         ]:
             with self.assertRaises(backup.BackupError):
                 config.parse_config(self.path, data)
-        self.path.chmod(0o666)
-        with self.assertRaisesRegex(backup.BackupError, "writable"):
-            config.load_config(self.path)
+        if os.name != "nt":
+            self.path.chmod(0o666)
+            with self.assertRaisesRegex(backup.BackupError, "writable"):
+                config.load_config(self.path)
 
     def test_schedule_accepts_normal_numeric_cron_and_rejects_injection(self):
         for value in ["0 2 * * *", "*/5 1-3 * * 1,2,3", "0 23 1 12 7"]:
@@ -70,8 +71,9 @@ class ConfigurationCronTests(unittest.TestCase):
         self.assertEqual(json.loads(self.path.read_text())["max_backups"], 0)
         self.assertNotIn("test-secret", self.path.read_text())
         self.assertIn("test-secret", generated.defaults_file.read_text())
-        self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
-        self.assertEqual(generated.defaults_file.stat().st_mode & 0o777, 0o600)
+        if os.name != "nt":
+            self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(generated.defaults_file.stat().st_mode & 0o777, 0o600)
         self.assertEqual(generated.mysql_version, "8.4.7")
         self.assertEqual(generated.binlog_dir, local)
         saved = json.loads(self.path.read_text())
@@ -175,6 +177,7 @@ class ConfigurationCronTests(unittest.TestCase):
         self.assertEqual(client.read_bytes(), original)
         self.assertFalse(path.exists())
 
+    @unittest.skipIf(os.name == "nt", "Windows uses Task Scheduler, not cron")
     def test_cron_and_cleanup_do_not_require_live_source_for_automatic_config(self):
         data = {key: value for key, value in self.data.items()
                 if key not in {"mysql_version", "role", "binlog_dir", "binlog_index"}}
@@ -231,6 +234,7 @@ class ConfigurationCronTests(unittest.TestCase):
                 config.publish_text(target, "replacement")
         self.assertEqual(json.loads(self.path.read_text()), self.data)
 
+    @unittest.skipIf(os.name == "nt", "Windows uses Task Scheduler, not cron")
     def test_cron_preview_does_not_call_crontab_and_export_is_noclobber(self):
         output = self.root / "backup.cron"
         with patch("sys.argv", ["mysql-restore", "--config", str(self.path), "cron", "--output", str(output)]), \
@@ -242,6 +246,7 @@ class ConfigurationCronTests(unittest.TestCase):
         self.assertIn("--config", output.read_text())
         self.assertNotIn("password", output.read_text())
 
+    @unittest.skipIf(os.name == "nt", "Windows uses Task Scheduler, not cron")
     def test_cron_merge_is_idempotent_preserving_other_jobs(self):
         block = cron.render(config.load_config(self.path))
         unrelated = "# existing\n15 3 * * * /opt/another-job\n"
@@ -255,6 +260,7 @@ class ConfigurationCronTests(unittest.TestCase):
         with self.assertRaisesRegex(backup.BackupError, "malformed"):
             cron.merge(block.splitlines()[0] + "\n", block)
 
+    @unittest.skipIf(os.name == "nt", "Windows uses Task Scheduler, not cron")
     def test_cron_quotes_spaces_and_escapes_percent_and_preserves_client_path(self):
         spaced = self.root / "config 10%.json"
         backup.atomic_json(spaced, self.data)
@@ -263,6 +269,7 @@ class ConfigurationCronTests(unittest.TestCase):
         self.assertIn(r"10\%.json", block)
         self.assertIn("export PATH=/opt/mysql/bin:/usr/bin", block)
 
+    @unittest.skipIf(os.name == "nt", "Windows uses Task Scheduler, not cron")
     def test_cron_install_is_verified_and_noop_on_second_run(self):
         block = cron.render(config.load_config(self.path))
         existing = "# keep me\n"
@@ -287,6 +294,7 @@ class ConfigurationCronTests(unittest.TestCase):
         )):
             self.assertEqual(cron.read_crontab(), "")
 
+    @unittest.skipIf(os.name == "nt", "Windows uses Task Scheduler, not cron")
     def test_cron_install_refuses_concurrent_change(self):
         block = cron.render(config.load_config(self.path))
         with patch.object(cron, "read_crontab", side_effect=["", "# concurrent\n"]), \
@@ -302,6 +310,7 @@ class ConfigurationCronTests(unittest.TestCase):
             self.assertEqual(cli.main(), 1)
         install.assert_not_called()
 
+    @unittest.skipIf(os.name == "nt", "Windows uses Task Scheduler, not shell scripts")
     def test_generated_shell_script_executes_saved_command_and_has_private_permissions(self):
         interpreter = self.root / "test-python"
         captured = self.root / "arguments"
