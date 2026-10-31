@@ -232,6 +232,10 @@ class Recovery:
         last_error = ""
         while time.monotonic() < deadline:
             try:
+                # The entrypoint's temporary initialization server also accepts SQL.
+                process = run(["docker", "exec", self.name, "cat", "/proc/1/comm"]).strip()
+                if process != "mysqld":
+                    raise BackupError("Official image initialization is still running (PID 1: {})".format(process))
                 actual = self.query("SELECT @@version").strip()
             except BackupError as exc:
                 last_error = str(exc)
@@ -244,8 +248,10 @@ class Recovery:
             if actual != self.version:
                 raise BackupError("Recovery image version differs from the source: " + actual)
             self.configure_binlog_tool()
+            progress_log("Final MySQL server is ready")
             return
-        raise BackupError("Recovery MySQL readiness timed out: " + last_error)
+        logs = run(["docker", "logs", "--tail", "80", self.name], include_stderr=True)
+        raise BackupError("Recovery MySQL readiness timed out: " + last_error + "\nContainer logs:\n" + logs)
 
     def ensure_image(self) -> str:
         return "mysql:" + self.version

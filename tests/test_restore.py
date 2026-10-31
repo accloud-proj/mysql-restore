@@ -204,7 +204,7 @@ class RestoreTests(unittest.TestCase):
 
     def test_container_is_isolated_and_event_scheduler_disabled(self):
         recovery = restore.Recovery(self.root, "8.4.7", self.config, self.local)
-        with patch.object(restore, "run", return_value="") as command, \
+        with patch.object(restore, "run", return_value="mysqld\n") as command, \
                 patch.object(recovery, "configure_binlog_tool"), \
                 patch.object(recovery, "query", return_value="8.4.7\n"):
             recovery.start(1)
@@ -227,6 +227,70 @@ class RestoreTests(unittest.TestCase):
             with self.assertRaisesRegex(backup.BackupError, "Cleanup failed"):
                 recovery.cleanup()
         self.assertEqual(command.call_count, 2)
+
+    def test_start_waits_for_final_server_not_queryable_bootstrap_server(self):
+        recovery = restore.Recovery(self.root, "8.4.7", self.config, self.local)
+        processes = iter(["bash", "mysqld", "mysqld"])
+        observed = []
+
+        def fake_run(command, **kwargs):
+            if command[:2] == ["docker", "exec"]:
+                process = next(processes)
+                observed.append(process)
+                return process + "\n"
+            if command[:2] == ["docker", "inspect"]:
+                return "true"
+            return ""
+
+        def query(sql):
+            if not observed:
+                # The bootstrap server can answer queries before the entrypoint shuts it down.
+                return "8.4.7\n"
+            if len(observed) == 2:
+                raise backup.BackupError("ERROR 2002: socket not available yet")
+            return "8.4.7\n"
+
+        with patch.object(restore, "run", side_effect=fake_run), \
+                patch.object(recovery, "query", side_effect=query) as queried, \
+                patch.object(recovery, "configure_binlog_tool") as configured, \
+                patch.object(restore.time, "sleep"):
+            recovery.start(10)
+        self.assertEqual(observed, ["bash", "mysqld", "mysqld"])
+        self.assertEqual(queried.call_count, 2)
+        configured.assert_called_once()
+
+    def test_start_surfaces_container_exit_during_initialization(self):
+        recovery = restore.Recovery(self.root, "8.4.7", self.config, self.local)
+
+        def fake_run(command, **kwargs):
+            if command[:2] == ["docker", "exec"]:
+                raise backup.BackupError("Container is not running")
+            if command[:2] == ["docker", "inspect"]:
+                return "false"
+            if command[:2] == ["docker", "logs"]:
+                return "mysqld: initialization failed"
+            return ""
+
+        with patch.object(restore, "run", side_effect=fake_run), \
+                patch.object(recovery, "query") as queried:
+            with self.assertRaisesRegex(backup.BackupError, "initialization failed"):
+                recovery.start(10)
+        queried.assert_not_called()
+
+    def test_start_timeout_includes_container_logs(self):
+        recovery = restore.Recovery(self.root, "8.4.7", self.config, self.local)
+
+        def fake_run(command, **kwargs):
+            if command[:2] == ["docker", "logs"]:
+                return "Starting temporary server"
+            return ""
+
+        with patch.object(restore, "run", side_effect=fake_run) as executed, \
+                patch.object(restore.time, "monotonic", side_effect=[0, 11]):
+            with self.assertRaisesRegex(backup.BackupError, "timed out:.*\\nContainer logs:\\nStarting"):
+                recovery.start(10)
+        self.assertIn(["docker", "logs", "--tail", "80", recovery.name],
+                      [call.args[0] for call in executed.call_args_list])
 
     def test_official_image_never_requires_custom_build(self):
         recovery = restore.Recovery(self.root, "8.4.7", self.config)

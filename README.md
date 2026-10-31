@@ -1,28 +1,23 @@
-# mysql-restore tool
+# mysql-restore
 
 [中文使用说明](README_zh.md)
 
-Create scheduled **mysqldump GTID full backups**, then recover to a chosen time
-using the source's existing binlogs in an official MySQL Docker container.
-The result is an SQL export; the production database is never overwritten.
-Run on either the primary host or a read-only replica host.
+Schedule MySQL backups and recover to a chosen time as an SQL export.
+**The production database is never overwritten.**
 
-## Requirements
+Full backups use `mysqldump`; recovery combines a backup with the source binlogs
+inside Docker. Run on a primary or read-only replica host.
 
-- [uv](https://docs.astral.sh/uv/getting-started/installation/) and Python 3.14+
-  (managed by uv).
-- Oracle MySQL 8.0.32+, with matching `mysql` and `mysqldump` clients.
-  Primary/replica recovery is tested on 8.4.7 and 26.10.0; test other releases first.
-  MySQL 5.x, MariaDB and Percona are unsupported.
-- Docker running for recovery. If the official image lacks `mysqlbinlog`, install
-  the matching host tool; both tested image versions require it.
-- InnoDB application tables, no schema changes during backup, and readable local
-  source binlogs. Enable GTID and ROW binary logging; see the Chinese guide for
-  server configuration and backup-account grants.
-- Replicas need `log-replica-updates=ON`, `read-only=ON`, a unique server ID and
-  working replication. Use their local binlogs, not relay logs.
+## Before you start
 
-## 1. Clone and configure
+- Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and Docker.
+- Use Oracle MySQL 8.0.32+ with matching `mysql`, `mysqldump` and `mysqlbinlog` tools.
+- Ask your database administrator to enable GTID and ROW binlogs and provide
+  a backup account. Replicas also need `log_replica_updates` and read-only mode.
+- Run where source binlogs are locally readable. Use InnoDB application tables
+  and avoid schema changes during backups.
+
+## 1. Install and configure
 
 ```sh
 git clone https://github.com/accloud-proj/mysql-restore.git
@@ -31,126 +26,94 @@ uv sync
 uv run mysql-restore init
 ```
 
-Enter the source connection, backup destination, nightly schedule and retention
-count. Password input is hidden. Version, role and binlog paths are discovered
-from the source without prompts. Setup validates the source before saving files;
-on failure it removes newly created credentials, never an existing credential file.
-Setup creates `mysql-restore.json` and a private `mysql-restore.client.cnf`.
-Never commit real credentials.
+Enter the connection, credentials, backup directory, schedule and retention count.
+Version, role and log directory are detected automatically.
 
-Alternatively edit [config.example.json](config.example.json) and provide a MySQL
-client credential file with mode `600`.
+Setup creates `mysql-restore.json` and `mysql-restore.client.cnf`.
+Do not share or commit these files.
 
-Important settings:
+For manual setup, use the [configuration template](config.example.json).
+For Docker sources, set `binlog_dir` to the host log directory.
+Backup and binlog directories must not contain each other.
 
-| Field           | Meaning                                                       |
-| --------------- | ------------------------------------------------------------- |
-| `role`          | Optional; detected from replication channels; override with `primary`/`replica` |
-| `mysql_version` | Optional; queried from source; explicit versions must match |
-| `backup_dir`    | Full-backup destination                                       |
-| `binlog_dir`    | Optional; discovered server directory; override with host path |
-| `binlog_index`  | Optional local index; omitted/`null` uses the source log list |
-| `schedule`      | Cron schedule, default `0 2 * * *`                            |
-| `max_backups`   | Positive count to retain; `0`/`null`/omitted disables cleanup |
-| `log_file`      | Scheduled-backup log                                          |
-
-Configuration paths are relative to the configuration file. Keep backup and
-source-log directories separate and non-nested. For Docker sources, use the
-host bind-mount path.
-
-Omit automatic fields or set them to `null`. New configurations do not persist
-discovered values: `check`, `backup` and `restore` resolve them on each run.
-Cron generation and cleanup remain offline.
-Server paths cannot reveal Docker mount mappings. Inaccessible paths produce an
-explicit error; use the template and set `binlog_dir` (and `binlog_index` if needed)
-to the correct host paths. With an explicit directory and no index, logs are
-listed from the source.
-
-## 2. Check and back up
+## 2. Check and create your first backup
 
 ```sh
 uv run mysql-restore check
 uv run mysql-restore backup
 ```
 
-Each full backup contains a timestamped SQL dump and recovery metadata.
-Keep the complete backup directory.
+Schedule backups only after these succeed. Keep each complete backup directory.
 
-Select another configuration before the subcommand:
+## 3. Schedule automatic backups
+
+Install into the current user's crontab:
 
 ```sh
-uv run mysql-restore --config /etc/mysql/pitr.json backup
+uv run mysql-restore cron --install
 ```
 
-## 3. Schedule nightly backups
+Default: daily at 02:00 in the system timezone.
+Change `schedule` in the configuration and run this command again to update it.
+
+Or generate a script and cron fragment, then add the fragment with `crontab -e`:
 
 ```sh
-# Preview
-uv run mysql-restore cron
-
-# Install into the current user's crontab after confirmation
-uv run mysql-restore cron --install
-
-# Or generate a script and fragment to add manually with crontab -e
 uv run mysql-restore cron --script ./nightly-backup.sh --output backup.cron
 ```
 
-Default: daily at 02:00 in the host timezone. Change `schedule` and reinstall to
-update it; unrelated jobs are preserved. The log parent must exist and be
-writable. Regenerate jobs after moving the project or rebuilding its environment.
+Scheduled logs default to `mysql-backup.log`.
+Reinstall the job after moving the project.
 
-## 4. Recover and export
+## 4. Recover to a chosen time
+
+Start Docker, then run:
 
 ```sh
-mkdir -p exports
 uv run mysql-restore restore \
-  --target-time '2026-10-31T14:30:00+08:00' \
-  --output ./exports/restored.sql
+  --target-time '2026-11-01T00:01:00+08:00' \
+  --output ./restored.sql
 ```
 
-For selected databases, append `--database shop` (repeatable).
-For tables, append `--database shop --table orders --table order_items`;
-table exports require exactly one database.
+All application databases are exported by default. Append parameters to select:
 
-Time requires an explicit timezone. The output parent must exist and the output
-file must not exist. Temporary containers/volumes are removed after recovery.
-Replica targets use local replica commit time, including replication lag.
+| Export | Parameters |
+| --- | --- |
+| One database | `--database shop` |
+| Multiple databases | `--database shop --database billing` |
+| Tables in one database | `--database shop --table orders --table order_items` |
 
-Recovery logs steps to stderr automatically, with elapsed-time updates every
-five seconds. Copying shows byte percentages; binlog processing shows file
-counts; decoding/exporting shows bytes written. Import percentages measure SQL
-input consumption, **not database execution**: wait for `DONE`, even at 100%.
-Steps without measurable percentages show a running status instead.
-Use `2>restore.log` to save the logs.
+Include a timezone in the target time. The output directory must exist and the
+output file must not exist.
 
-## 5. Retain or clean backups
+Steps and progress appear automatically. Wait for `Recovery export completed`.
 
-Set `"max_backups": 7` to automatically retain the latest seven snapshots after
-each successful backup. `0`, `null` or an omitted field disables deletion;
-`1` retains only the latest snapshot. Negative values are invalid.
+## 5. Limit retained backups
+
+Set `"max_backups": 7` to retain the latest seven backups after each successful
+backup. `0`, `null` or omission disables cleanup. Positive integers set the
+retention count; negative values are invalid.
+
+Preview or clean manually:
 
 ```sh
 uv run mysql-restore cleanup --max-backups 7 --dry-run
 uv run mysql-restore cleanup --max-backups 7
 ```
 
-Cleanup deletes old full backups only, never source binlogs.
+Only old full backups are deleted, never source binlogs.
 
 ## Important
 
-- Recovery requires an online source, an eligible full backup and continuous logs.
-- **Purged or lost source binlogs make that time range unrecoverable.**
-  Set source log retention to match your recovery window.
-- Application databases only: system accounts, grants, plugins and keys are not
-  backed up. Manage special DEFINER/plugin dependencies separately.
-- Allow enough recovery disk space and rehearse recovery before production use.
-  Use a new backup directory after upgrading the source version.
+- Recovery requires an online source, an earlier full backup and continuous
+  binlogs. **Lost or purged logs make the corresponding time range unrecoverable.**
+- Replica targets use local replica commit time and include replication lag.
+- System accounts and grants are not backed up. Allow sufficient disk space
+  and rehearse recovery before production use.
 
-```sh
-uv run mysql-restore --help
-uv run mysql-restore restore --help
-```
+See `uv run mysql-restore --help` for other options.
+Place `--config PATH` before the subcommand to select another configuration.
 
-## LICENSE
+## License
 
 [BSD-3-Clause](LICENSE)
