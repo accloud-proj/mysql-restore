@@ -81,6 +81,39 @@ class DockerIntegrationTests(unittest.TestCase):
                 contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(cli.main(), 0)
 
+    def test_primary_recovery_allows_rotation_before_and_during_recovery(self):
+        container, data = self.source_container("rotation")
+        config = self.write_config(container, data, "primary")
+        container.query(
+            "CREATE DATABASE rotation_test; "
+            "CREATE TABLE rotation_test.items (id INT PRIMARY KEY, value VARCHAR(32)) ENGINE=InnoDB; "
+            "INSERT INTO rotation_test.items VALUES (1,'before');"
+        )
+        with self.routed_source(container):
+            self.invoke(config, "backup")
+            container.query("FLUSH BINARY LOGS; UPDATE rotation_test.items SET value='included' WHERE id=1;")
+            target = backup.Source(container.work / "client.cnf").current_time()
+            container.query("DO SLEEP(0.05); UPDATE rotation_test.items SET value='excluded' WHERE id=1;")
+            original_cutoff = restore.Recovery.find_cutoff
+
+            def rotate_after_cutoff(recovery, entries, start, time_target):
+                cutoff = original_cutoff(recovery, entries, start, time_target)
+                container.query("FLUSH BINARY LOGS")
+                return cutoff
+
+            output = self.root / "rotated.sql"
+            with patch.object(restore.Recovery, "find_cutoff", new=rotate_after_cutoff):
+                self.invoke(config, "restore", "--target-time", backup.timestamp(target),
+                            "--output", str(output))
+            self.assertIn("included", output.read_text())
+            self.assertNotIn("excluded", output.read_text())
+            # Reusing the same backup must still work after both rotations.
+            repeated = self.root / "repeated.sql"
+            self.invoke(config, "restore", "--target-time", backup.timestamp(target),
+                        "--output", str(repeated))
+            self.assertIn("included", repeated.read_text())
+            self.assertNotIn("excluded", repeated.read_text())
+
     def test_primary_cli_uses_active_binlog_and_exports_reimportable_sql(self):
         container, data = self.source_container("primary")
         config = self.write_config(container, data, "primary")

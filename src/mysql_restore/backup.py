@@ -58,6 +58,41 @@ def sha256(path: Path, size: Optional[int] = None) -> str:
     return digest.hexdigest()
 
 
+def binlog_digests(path: Path, size: int, *, legacy: bool = False) -> tuple[str, ...]:
+    """Hash a fixed prefix, normalizing only the FDE's binlog-in-use bit."""
+    if size < 4:
+        raise BackupError("Invalid binlog hash boundary")
+    with path.open("rb") as stream:
+        prefix_size = min(size, 81)
+        prefix = bytearray(stream.read(prefix_size))
+        if len(prefix) != prefix_size:
+            raise BackupError("Binlog was truncated: " + str(path))
+        if prefix[:4] != b"\xfebin":
+            raise BackupError("Not an unencrypted MySQL binlog: " + str(path))
+        has_fde = len(prefix) >= 23 and prefix[8] == 15
+        if has_fde:
+            event_size = int.from_bytes(prefix[13:17], "little")
+            if (len(prefix) < 81 or not 76 <= event_size <= size - 4
+                    or prefix[23:25] != b"\x04\x00" or prefix[80] != 19):
+                raise BackupError("Invalid binlog format description: " + str(path))
+            # MySQL clears this bit at close/rotation; FDE CRC32 excludes it.
+            # File offset = 4-byte magic + 17-byte event-header flags offset.
+            prefix[21] &= ~1
+        digests = [hashlib.sha256(prefix)]
+        if legacy and has_fde:
+            prefix[21] |= 1
+            digests.append(hashlib.sha256(prefix))
+        remaining = size - prefix_size
+        while remaining:
+            block = stream.read(min(remaining, 1024 * 1024))
+            if not block:
+                raise BackupError("Binlog was truncated: " + str(path))
+            for digest in digests:
+                digest.update(block)
+            remaining -= len(block)
+    return tuple(digest.hexdigest() for digest in digests)
+
+
 def atomic_json(path: Path, data: dict) -> None:
     descriptor, name = tempfile.mkstemp(prefix=".metadata-", dir=path.parent)
     temporary = Path(name)
@@ -356,7 +391,7 @@ def create_backup(source: Source, config: dict, directory: Path, local: Path, se
             metadata["selected_databases"] = selected
             metadata["selected_sha256"] = sha256(temporary / "selected.sql")
         anchor = local_log(local, coordinates["binlog_file"], coordinates["binlog_position"])
-        metadata["anchor_sha256"] = sha256(anchor, coordinates["binlog_position"])
+        metadata["anchor_sha256"] = binlog_digests(anchor, coordinates["binlog_position"])[0]
         atomic_json(temporary / "metadata.json", metadata)
         destination = directory / name
         if destination.exists():

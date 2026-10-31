@@ -20,6 +20,7 @@ from .backup import (
     BackupError, SYSTEM_DATABASES, UTC, parse_time, quote_identifier, read_json,
     run, sha256, supported_version, validate_log_chain, write_client_file, local_log,
     check_client,
+    binlog_digests,
 )
 
 
@@ -120,13 +121,13 @@ def select_logs(local: Path, metadata: dict, target: dt.datetime, window: dict,
     for number, entry in enumerate(selected, 1):
         with progress_step("Hashing binlog {}/{}: {}".format(number, len(selected), entry["name"])):
             path = local_log(local, entry["name"], entry["size"])
-            entry["sha256"] = sha256(path, entry["size"])
+            entry["sha256"] = binlog_digests(path, entry["size"])[0]
     if not 4 <= metadata["binlog_position"] <= selected[0]["size"]:
         raise BackupError("Snapshot binlog position is outside the source file")
     if "anchor_sha256" not in metadata:
         raise BackupError("This snapshot predates direct-binlog validation; create a new full backup")
     anchor = local_log(local, metadata["binlog_file"], metadata["binlog_position"])
-    if sha256(anchor, metadata["binlog_position"]) != metadata["anchor_sha256"]:
+    if metadata["anchor_sha256"] not in binlog_digests(anchor, metadata["binlog_position"], legacy=True):
         raise BackupError("Starting binlog was rewritten or belongs to a different instance")
     return selected
 
@@ -135,7 +136,7 @@ def verify_logs(local: Path, entries: list) -> None:
     for number, entry in enumerate(entries, 1):
         with progress_step("Verifying binlog {}/{}: {}".format(number, len(entries), entry["name"])):
             path = local_log(local, entry["name"], entry["size"])
-            if sha256(path, entry["size"]) != entry["sha256"]:
+            if binlog_digests(path, entry["size"])[0] != entry["sha256"]:
                 raise BackupError("Source binlog changed during recovery: " + entry["name"])
 
 
