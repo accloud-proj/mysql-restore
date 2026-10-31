@@ -8,7 +8,7 @@
 
 - 安装 Docker；源码运行方式还需安装 [uv](https://docs.astral.sh/uv/getting-started/installation/)。
 - 使用 Oracle MySQL 8.0.32+，安装同版本的 `mysql`、`mysqldump`、`mysqlbinlog`。
-- 请数据库管理员开启 GTID 和 ROW 格式 binlog，提供有备份权限的账号；从库还需开启 `log_replica_updates` 并保持只读。
+- 请数据库管理员开启 GTID 和 binlog，提供有备份权限的账号；支持 ROW、MIXED、STATEMENT，推荐 ROW。从库还需开启 `log_replica_updates` 并保持只读。
 - 在能读取源库 binlog 文件的主机上运行；应用表使用 InnoDB，备份期间不要修改表结构。
 
 ## 1. 安装和配置

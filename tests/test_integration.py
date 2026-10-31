@@ -114,6 +114,43 @@ class DockerIntegrationTests(unittest.TestCase):
             self.assertIn("included", repeated.read_text())
             self.assertNotIn("excluded", repeated.read_text())
 
+    def test_statement_and_mixed_logs_restore_to_transaction_boundary(self):
+        for format in ["STATEMENT", "MIXED"]:
+            with self.subTest(format=format):
+                container, data = self.source_container(format.lower())
+                config = self.write_config(container, data, "primary")
+                settings = backup.read_json(config)
+                settings["backup_dir"] = str(self.root / (format.lower() + "-backups"))
+                backup.atomic_json(config, settings)
+                container.query("SET GLOBAL binlog_format='" + format + "'")
+                container.query(
+                    "CREATE DATABASE format_test; "
+                    "CREATE TABLE format_test.items (id INT PRIMARY KEY, value VARCHAR(64)) ENGINE=InnoDB; "
+                    "INSERT INTO format_test.items VALUES (1,'before');"
+                )
+                with self.routed_source(container):
+                    self.invoke(config, "check")
+                    self.invoke(config, "backup")
+                    container.query("UPDATE format_test.items SET value='included' WHERE id=1")
+                    if format == "MIXED":
+                        # UUID() forces row events in MIXED, alongside the safe SQL update.
+                        container.query("INSERT INTO format_test.items VALUES (2,UUID())")
+                    target = backup.Source(container.work / "client.cnf").current_time()
+                    container.query("DO SLEEP(0.05); UPDATE format_test.items SET value='excluded' WHERE id=1")
+                    output = self.root / (format.lower() + ".sql")
+                    self.invoke(config, "restore", "--target-time", backup.timestamp(target),
+                                "--output", str(output))
+                work = self.root / (format.lower() + "-verify")
+                work.mkdir()
+                verify = restore.Recovery(work, self.version, self.settings)
+                self.addCleanup(verify.cleanup)
+                verify.start(180)
+                verify.import_sql(output)
+                self.assertEqual(verify.query("SELECT value FROM format_test.items WHERE id=1").strip(),
+                                 "included")
+                self.assertEqual(verify.query("SELECT COUNT(*) FROM format_test.items").strip(),
+                                 "2" if format == "MIXED" else "1")
+
     def test_primary_cli_uses_active_binlog_and_exports_reimportable_sql(self):
         container, data = self.source_container("primary")
         config = self.write_config(container, data, "primary")

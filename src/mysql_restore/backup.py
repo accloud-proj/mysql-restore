@@ -244,11 +244,13 @@ class Source:
             raise BackupError("Unexpected source server configuration response")
         row = rows[0]
         version = supported_version(row[0])
-        if row[2:7] != ["1", "ON", "ON", "ROW", "0"]:
+        if row[2:5] != ["1", "ON", "ON"] or row[6] != "0":
             raise BackupError(
                 "Source requires log_bin=ON, gtid_mode=ON, enforce_gtid_consistency=ON, "
-                "binlog_format=ROW and binlog_encryption=OFF"
+                "binlog_encryption=OFF"
             )
+        if row[5] not in {"ROW", "MIXED", "STATEMENT"}:
+            raise BackupError("Unsupported source binlog_format: " + row[5])
         if row[11] != "0":
             raise BackupError("binlog_transaction_compression must be OFF")
         if role is None:

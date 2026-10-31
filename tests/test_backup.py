@@ -189,6 +189,25 @@ class BackupTests(unittest.TestCase):
                 with self.assertRaisesRegex(backup.BackupError, "log_replica_updates"):
                     source.inspect("replica")
 
+    def test_all_binlog_formats_supported_without_relaxing_gtid_or_encryption(self):
+        source = backup.Source(self.root / "client.cnf")
+        row = ["8.0.45", SOURCE_UUID, "1", "ON", "ON", "ROW", "0", "0",
+               "utf8mb4", "utf8mb4_0900_ai_ci", "", "0", "1", "1"]
+        for role in ["primary", "replica"]:
+            for format in ["ROW", "MIXED", "STATEMENT"]:
+                with self.subTest(role=role, format=format):
+                    values = row.copy()
+                    values[5] = format
+                    with patch.object(source, "query", return_value=[values]):
+                        self.assertEqual(source.inspect(role)["mysql_version"], "8.0.45")
+        for index, value in [(2, "0"), (3, "OFF"), (4, "OFF"), (5, "UNKNOWN"), (6, "1"), (11, "1")]:
+            values = row.copy()
+            values[5] = "MIXED"
+            values[index] = value
+            with patch.object(source, "query", return_value=[values]):
+                with self.assertRaises(backup.BackupError):
+                    source.inspect()
+
     def test_auto_role_uses_replication_channels_and_enforces_replica_requirements(self):
         source = backup.Source(self.root / "client.cnf")
         row = ["8.4.7", SOURCE_UUID, "1", "ON", "ON", "ROW", "0", "0",

@@ -12,7 +12,8 @@ inside Docker. Run on a primary or read-only replica host.
 
 - Install Docker; source checkout usage also requires [uv](https://docs.astral.sh/uv/getting-started/installation/).
 - Use Oracle MySQL 8.0.32+ with matching `mysql`, `mysqldump` and `mysqlbinlog` tools.
-- Ask your database administrator to enable GTID and ROW binlogs and provide
+- Ask your database administrator to enable GTID and binlogs (ROW, MIXED or
+  STATEMENT; ROW recommended) and provide
   a backup account. Replicas also need `log_replica_updates` and read-only mode.
 - Run where source binlogs are locally readable. Use InnoDB application tables
   and avoid schema changes during backups.
