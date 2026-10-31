@@ -223,7 +223,7 @@ class Source:
 
     def query(self, sql: str) -> list:
         text = run([
-            "mysql", "--defaults-file=" + str(self.options), "--no-login-paths",
+            "mysql", "--defaults-file=" + str(self.options),
             "--batch", "--skip-column-names", "--execute", sql,
         ])
         escapes = {"0": "\x00", "b": "\b", "t": "\t", "n": "\n", "r": "\r", "Z": "\x1a", "\\": "\\"}
@@ -331,7 +331,7 @@ class Source:
 
     def dump(self, path: Path, databases: list, *, recovery: bool) -> None:
         command = [
-            "mysqldump", "--defaults-file=" + str(self.options), "--no-login-paths",
+            "mysqldump", "--defaults-file=" + str(self.options),
             "--single-transaction", "--quick", "--routines", "--events", "--triggers",
             "--hex-blob", "--no-tablespaces", "--default-character-set=utf8mb4",
             "--set-gtid-purged=" + ("ON" if recovery else "OFF"),

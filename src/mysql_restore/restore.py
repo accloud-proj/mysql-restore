@@ -281,7 +281,7 @@ class Recovery:
     def mysql_command(self) -> list:
         return [
             "docker", "exec", "-i", self.name, "mysql",
-            "--defaults-file=/work/client.cnf", "--no-login-paths", "--binary-mode",
+            "--defaults-file=/work/client.cnf", "--binary-mode",
             "--batch", "--raw", "--skip-column-names",
         ]
 
@@ -382,7 +382,6 @@ class Recovery:
                     raise BackupError("Table does not exist at target: " + table)
         command = [
             "docker", "exec", self.name, "mysqldump", "--defaults-file=/work/client.cnf",
-            "--no-login-paths",
             "--single-transaction", "--quick", "--hex-blob", "--no-tablespaces",
             "--triggers", "--set-gtid-purged=OFF", "--default-character-set=utf8mb4",
         ]

@@ -187,7 +187,7 @@ def initialize(path: Path, defaults_file: Optional[Path] = None) -> Config:
         "format": 1,
         "host": prompt("Source host", "127.0.0.1"),
         "port": int(prompt("Source port", "3306")),
-        "user": prompt("Backup user", "backup"),
+        "user": prompt("Backup user", "root"),
         "backup_dir": prompt("Full backup directory", "./backups"),
         "schedule": prompt("Full backup cron schedule", "0 2 * * *"),
         "log_file": prompt("Backup cron log file", "./mysql-backup.log"),
