@@ -255,8 +255,8 @@ class Source:
             raise BackupError("binlog_transaction_compression must be OFF")
         if role is None:
             role = "replica" if self.query("SHOW REPLICA STATUS") else "primary"
-        if role == "replica" and row[12:14] != ["1", "1"]:
-            raise BackupError("Replica backups require log_replica_updates=ON and read_only=ON")
+        if role == "replica" and row[12] != "1":
+            raise BackupError("Replica backups require log_replica_updates=ON")
         try:
             source_uuid = str(uuid.UUID(row[1]))
         except ValueError as exc:

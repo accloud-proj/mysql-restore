@@ -178,14 +178,14 @@ class BackupTests(unittest.TestCase):
                 with self.assertRaises(backup.BackupError):
                     source.log_directory()
 
-    def test_replica_requires_local_replication_binlogs_and_readonly(self):
+    def test_replica_requires_local_replication_binlogs_but_allows_local_writes(self):
         source = backup.Source(self.root / "client.cnf")
         row = ["8.4.7", SOURCE_UUID, "1", "ON", "ON", "ROW", "0", "0",
                "utf8mb4", "utf8mb4_0900_ai_ci", "", "0", "1", "1"]
-        with patch.object(source, "query", return_value=[row]):
-            self.assertEqual(source.inspect("replica")["role"], "replica")
-        for values in [["0", "1"], ["1", "0"]]:
-            with patch.object(source, "query", return_value=[row[:12] + values]):
+        for read_only in ["0", "1"]:
+            with patch.object(source, "query", return_value=[row[:13] + [read_only]]):
+                self.assertEqual(source.inspect("replica")["role"], "replica")
+            with patch.object(source, "query", return_value=[row[:12] + ["0", read_only]]):
                 with self.assertRaisesRegex(backup.BackupError, "log_replica_updates"):
                     source.inspect("replica")
 
@@ -214,9 +214,11 @@ class BackupTests(unittest.TestCase):
                "utf8mb4", "utf8mb4_0900_ai_ci", "", "0", "1", "1"]
         for channels, expected in [([], "primary"), ([["channel"]], "replica"),
                                    ([["first"], ["second"]], "replica")]:
-            with patch.object(source, "query", side_effect=[[row], channels]) as query:
-                self.assertEqual(source.inspect(None)["role"], expected)
-            self.assertEqual(query.call_args_list[1].args[0], "SHOW REPLICA STATUS")
+            for read_only in ["0", "1"]:
+                with patch.object(source, "query", side_effect=[
+                        [row[:13] + [read_only]], channels]) as query:
+                    self.assertEqual(source.inspect(None)["role"], expected)
+                self.assertEqual(query.call_args_list[1].args[0], "SHOW REPLICA STATUS")
         with patch.object(source, "query", side_effect=[[row[:12] + ["0", "1"]], [["channel"]]]):
             with self.assertRaisesRegex(backup.BackupError, "log_replica_updates"):
                 source.inspect(None)
